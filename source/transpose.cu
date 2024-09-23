@@ -13,8 +13,8 @@
 #include <string>
 
 // Initialize sizes
-const int sizeX = 1234;
-const int sizeY = 3153;
+const int sizeX = 4096; // 1234
+const int sizeY = 4096; // 3153
 
 struct DIMS
 {
@@ -78,92 +78,138 @@ void preprocess(float *res, float *dev_res, int n)
     cudaMemset(dev_res, defaultFill, n * sizeof(float));
 }
 
-// TODO: COMPLETE THIS
 __global__ void copyKernel(const float* const a, float* const b)
 {
-    int i = 0;  // Compute correctly - Global X index
-    int j = 0;  // Compute correctly - Global Y index
+    int i = threadIdx.x + blockDim.x * blockIdx.x;  // Compute correctly - Global X index
+    int j = threadIdx.y + blockDim.y * blockIdx.y;  // Compute correctly - Global Y index
 
     // Check if i or j are out of bounds. If they are, return.
+    if (i >= sizeX || j >= sizeY)
+    {
+        return;
+    }
 
-    int index = 0;      // Compute 1D index from i, j
+    int index = i + j * sizeX;      // Compute 1D index from i, j
 
     // Copy data from A to B
     b[index] = a[index];
 }
 
-// TODO: COMPLETE THIS
 __global__ void matrixTransposeNaive(const float* const a, float* const b)
 {
-    int i = 0;  // Compute correctly - Global X index
-    int j = 0;  // Compute correctly - Global Y index
+    int i = threadIdx.x + blockDim.x * blockIdx.x;  // Compute correctly - Global X index
+    int j = threadIdx.y + blockDim.y * blockIdx.y;  // Compute correctly - Global Y index
 
     // Check if i or j are out of bounds. If they are, return.
+    if (i >= sizeX || j >= sizeY)
+    {
+        return;
+    }
 
-    int index_in = 0;  // Compute input index (i,j) from matrix A
-    int index_out = 0;  // Compute output index (j,i) in matrix B = transpose(A)
+    int index_in = i + j * sizeX;  // Compute input index (i,j) from matrix A
+    int index_out = j + i * sizeY; // Compute output index (j,i) in matrix B = transpose(A)
 
     // Copy data from A to B using transpose indices
     b[index_out] = a[index_in];
 }
 
-// TODO: COMPLETE THIS
 template<int BLOCK_SIZE_X, int BLOCK_SIZE_Y>
 __global__ void matrixTransposeShared(const float* const a, float* const b)
 {
     // Allocate appropriate shared memory - use mat as variable name
     // Example: <shared specifier> type mat[size][size]; - replace size with the correct values
+    __shared__ float mat[BLOCK_SIZE_Y][BLOCK_SIZE_X];
 
     // Compute input and output index
-    int bx = 0;     // Compute block offset - this is number of global threads in X before this block
-    int by = 0;     // Compute block offset - this is number of global threads in Y before this block
-    int i  = 0;     // Global input x index - Same as previous kernels
-    int j  = 0;     // Global input y index - Same as previous kernels
+    int bx = BLOCK_SIZE_X * blockIdx.x; // Compute block offset - this is number of global threads in X before this block
+    int by = BLOCK_SIZE_Y * blockIdx.y; // Compute block offset - this is number of global threads in Y before this block
+    int i  = threadIdx.x + bx;          // Global input x index - Same as previous kernels
+    int j  = threadIdx.y + by;          // Global input y index - Same as previous kernels
 
     // We are transposing the blocks here. See how ti uses by and tj uses bx
     // We transpose blocks using indices, and transpose with block sub-matrix using the shared memory
-    int ti = 0;     // Global output x index - remember the transpose
-    int tj = 0;     // Global output y index - remember the transpose
+    int ti = threadIdx.x + by;     // Global output x index - remember the transpose
+    int tj = threadIdx.y + bx;     // Global output y index - remember the transpose
 
     // Copy data from input to shared memory
+    if (i < sizeX && j < sizeY)
+    {
+        mat[threadIdx.y][threadIdx.x] = a[i + j * sizeX];
+    }
+    __syncthreads();
 
     // Copy data from shared memory to global memory
     // Switch threadIdx.x and threadIdx.y from input read
+    if (ti < sizeY && tj < sizeX)
+    {
+        b[ti + tj * sizeY] = mat[threadIdx.x][threadIdx.y];
+    }
 }
 
 template<int BLOCK_SIZE_X, int BLOCK_SIZE_Y>
 __global__ void matrixTransposeSharedwBC(const float* const a, float* const b)
 {
     // Allocate appropriate shared memory
+    __shared__ float mat[BLOCK_SIZE_Y][BLOCK_SIZE_X + 1];
 
     // Compute input and output index - same as matrixTransposeShared kernel
-    int bx = 0;       // Compute block offset - this is number of global threads in X before this block
-    int by = 0;       // Compute block offset - this is number of global threads in Y before this block
-    int i  = 0;       // Global input x index - Same as previous kernels
-    int j  = 0;       // Global input y index - Same as previous kernels
+    int bx = BLOCK_SIZE_X * blockIdx.x; // Compute block offset - this is number of global threads in X before this block
+    int by = BLOCK_SIZE_Y * blockIdx.y; // Compute block offset - this is number of global threads in Y before this block
+    int i  = threadIdx.x + bx;          // Global input x index - Same as previous kernels
+    int j  = threadIdx.y + by;          // Global input y index - Same as previous kernels
 
     // We are transposing the blocks here. See how ti uses by and tj uses bx
     // We transpose blocks using indices, and transpose with block sub-matrix using the shared memory
-    int ti = 0;       // Global output x index - remember the transpose
-    int tj = 0;       // Global output y index - remember the transpose
+    int ti = threadIdx.x + by;       // Global output x index - remember the transpose
+    int tj = threadIdx.y + bx;       // Global output y index - remember the transpose
 
     // Copy data from input to shared memory - similar to matrixTransposeShared Kernel
+    if (i < sizeX && j < sizeY)
+    {
+        mat[threadIdx.y][threadIdx.x] = a[i + j * sizeX];
+    }
+    __syncthreads();
 
     // Copy data from shared memory to global memory - similar to matrixTransposeShared Kernel
+    if (ti < sizeY && tj < sizeX)
+    {
+        b[ti + tj * sizeY] = mat[threadIdx.x][threadIdx.y];
+    }
 }
 
 template<int TILE, int SIDE>
 __global__ void matrixTransposeUnrolled(const float* a, float* b)
 {
     //Allocate appropriate shared memory
+    __shared__ float mat[TILE][TILE + 1];
 
     //Compute input and output index
-    int x = 0;
-    int y = 0;
+    int x = blockIdx.x * TILE + threadIdx.x;
+    int y = blockIdx.y * TILE + threadIdx.y;
 
     //Copy data from input to shared memory. Multiple copies per thread.
+    #pragma unroll
+    for (int k = 0; k < TILE; k += SIDE)
+    {
+        if (x < sizeX && y + k < sizeY)
+        {
+            mat[threadIdx.y + k][threadIdx.x] = a[((y + k) * sizeX) + x];
+        }
+    }
+    __syncthreads();
+
+    x = blockIdx.y * TILE + threadIdx.x;
+    y = blockIdx.x * TILE + threadIdx.y;
 
     //Copy data from shared memory to global memory. Multiple copies per thread.
+    #pragma unroll
+    for (int k = 0; k < TILE; k += SIDE)
+    {
+        if (x < sizeY && y + k < sizeX)
+        {
+            b[(y + k) * sizeY + x] = mat[threadIdx.x][threadIdx.y + k];
+        }
+    }
 }
 
 int main(int argc, char *argv[])
@@ -246,13 +292,12 @@ int main(int argc, char *argv[])
     {
         preprocess(b, d_b, sizeX * sizeY);
 
-        // TODO: COMPLETE THIS
         // Assign a 2D distribution of BS_X x BS_Y x 1 CUDA threads within
         // Calculate number of blocks along X and Y in a 2D CUDA "grid"
         DIMS dims;
-        dims.dimBlock = dim3(1, 1, 1);
-        dims.dimGrid  = dim3(1,
-                             1,
+        dims.dimBlock = dim3(32, 32, 1);
+        dims.dimGrid  = dim3(divup(sizeX, dims.dimBlock.x),
+                             divup(sizeY, dims.dimBlock.y),
                              1);
 
         // start the timer
@@ -290,13 +335,12 @@ int main(int argc, char *argv[])
     {
         preprocess(b, d_b, sizeX * sizeY);
 
-        // TODO: COMPLETE THIS
         // Assign a 2D distribution of BS_X x BS_Y x 1 CUDA threads within
         // Calculate number of blocks along X and Y in a 2D CUDA "grid"
         DIMS dims;
-        dims.dimBlock = dim3(1, 1, 1);
-        dims.dimGrid  = dim3(1,
-                             1,
+        dims.dimBlock = dim3(32, 32, 1);
+        dims.dimGrid  = dim3(divup(sizeX, dims.dimBlock.x),
+                             divup(sizeY, dims.dimBlock.y),
                              1);
 
         nvtxRangeId_t naiveTransposeBenchmark = nvtxRangeStart("Naive Transpose Benchmark");
@@ -333,13 +377,12 @@ int main(int argc, char *argv[])
     {
         preprocess(b, d_b, sizeX * sizeY);
 
-        // TODO: COMPLETE THIS
         // Assign a 2D distribution of BS_X x BS_Y x 1 CUDA threads within
         // Calculate number of blocks along X and Y in a 2D CUDA "grid"
         DIMS dims;
-        dims.dimBlock = dim3(1, 1, 1);
-        dims.dimGrid  = dim3(1,
-                             1,
+        dims.dimBlock = dim3(32, 32, 1);
+        dims.dimGrid  = dim3(divup(sizeX, dims.dimBlock.x),
+                             divup(sizeY, dims.dimBlock.y),
                              1);
 
         nvtxRangeId_t sharedMemoryTransposeBenchmark = nvtxRangeStart("Shared Memory Transpose Benchmark");
@@ -379,9 +422,9 @@ int main(int argc, char *argv[])
         // Assign a 2D distribution of BS_X x BS_Y x 1 CUDA threads within
         // Calculate number of blocks along X and Y in a 2D CUDA "grid"
         DIMS dims;
-        dims.dimBlock = dim3(1, 1, 1);
-        dims.dimGrid  = dim3(1,
-                             1,
+        dims.dimBlock = dim3(32, 32, 1);
+        dims.dimGrid  = dim3(divup(sizeX, dims.dimBlock.x),
+                             divup(sizeY, dims.dimBlock.y),
                              1);
 
         nvtxRangeId_t sharedMemoryTransposeWBCBenchmark = nvtxRangeStart("Shared Memory Transpose Without Bank Conflict Benchmark");
@@ -391,7 +434,7 @@ int main(int argc, char *argv[])
         for (int i = 0; i < iterations; i++)
         {
             // Launch the GPU kernel
-            matrixTransposeSharedwBC<1, 1><<<dims.dimGrid, dims.dimBlock>>>(d_a, d_b);
+            matrixTransposeSharedwBC<32, 32><<<dims.dimGrid, dims.dimBlock>>>(d_a, d_b);
         }
         // stop the timer
         cudaEventRecord(stop, 0);
